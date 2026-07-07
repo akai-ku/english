@@ -1097,7 +1097,8 @@ function startPronunciationCheck(targetText, opts = {}) {
     stopRecognition();
     return;
   }
-  window.speechSynthesis?.cancel();
+  // マイクがお手本の音を拾うと採点にならないので、再生は必ず止めてから聞き取る
+  stopPlayAll();
 
   activeRecordBtn = button;
   activeRecordLabel = label;
@@ -1785,9 +1786,124 @@ function startFulltext(methodId) {
   ftJa.classList.toggle("hidden", mode === "hide-ja");
   ftRevealBtn.classList.toggle("hidden", mode === "show-all");
 
+  ftPronResult.classList.add("hidden");
   fulltextDialog.showModal();
   if (m.autoplay) playAllCards();
 }
+
+// --- 全文発音チェック (連続認識で長い発話を聞き取り、全文に対して採点) ---
+
+const ftRecordBtn = document.getElementById("ft-record");
+const ftPronResult = document.getElementById("ft-pron-result");
+const FT_RECORD_LABEL = "🎤 全文発音チェック";
+
+let ftRecognition = null;
+let ftRecActive = false; // ユーザーが読み上げ中(勝手に切れたら再開する)
+let ftRecCancelled = false;
+let ftTranscript = "";
+
+function fulltextTarget() {
+  return fulltextCards.map((c) => speakableEnglish(c.en)).join(" ");
+}
+
+function resetFtRecordUi() {
+  ftRecordBtn.classList.remove("record-btn-active");
+  ftRecordBtn.textContent = FT_RECORD_LABEL;
+}
+
+/** 採点せずに全文認識を打ち切る(ダイアログを閉じたときなど) */
+function abortFtRecognition() {
+  if (!ftRecognition) return;
+  ftRecActive = false;
+  ftRecCancelled = true;
+  try {
+    ftRecognition.abort();
+  } catch {}
+}
+
+function startFulltextPronCheck() {
+  if (!SpeechRecognitionCtor) {
+    showToast("このブラウザは音声認識に対応していません(ChromeやSafariでお試しください)。", 7000);
+    return;
+  }
+  if (ftRecActive) {
+    // 2回目のタップ = 読み終わり。認識を締めて採点へ
+    ftRecActive = false;
+    try {
+      ftRecognition.stop();
+    } catch {}
+    return;
+  }
+
+  stopPlayAll(); // マイクがお手本を拾わないよう再生を止める
+  stopRecognition();
+  ftTranscript = "";
+  ftRecActive = true;
+  ftRecCancelled = false;
+
+  ftRecordBtn.classList.add("record-btn-active");
+  ftRecordBtn.textContent = "⏹ 全文を読み終えたらタップ";
+  ftPronResult.innerHTML = `<p class="pron-heard">🎙 聞き取り中… 全文を最初から読み上げてください。</p>`;
+  ftPronResult.classList.remove("hidden");
+
+  const rec = new SpeechRecognitionCtor();
+  rec.lang = "en-US";
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  rec.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const r = event.results[i];
+      if (r.isFinal) {
+        ftTranscript += r[0].transcript + " ";
+      } else {
+        interim += r[0].transcript;
+      }
+    }
+    const heard = (ftTranscript + interim).trim();
+    ftPronResult.innerHTML = `<p class="pron-heard">🎙 聞き取り中: …${escapeHtml(heard.slice(-100))}</p>`;
+  };
+  rec.onerror = (event) => {
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      showToast("マイクの使用が許可されていません。ブラウザの設定を確認してください。", 7000);
+      ftRecActive = false;
+      ftRecCancelled = true;
+    }
+    // no-speech などは onend 側で自動再開する
+  };
+  rec.onend = () => {
+    if (ftRecActive) {
+      // 無音などでモバイルが勝手に止めた場合は続きから再開する
+      try {
+        rec.start();
+        return;
+      } catch {
+        ftRecActive = false;
+      }
+    }
+    ftRecognition = null;
+    resetFtRecordUi();
+    if (!ftRecCancelled) {
+      showPronResult(fulltextTarget(), ftTranscript.trim(), ftPronResult);
+    } else {
+      ftPronResult.classList.add("hidden");
+    }
+    ftRecCancelled = false;
+  };
+
+  ftRecognition = rec;
+  try {
+    rec.start();
+  } catch {
+    ftRecActive = false;
+    ftRecognition = null;
+    resetFtRecordUi();
+  }
+}
+
+ftRecordBtn.addEventListener("click", startFulltextPronCheck);
 
 ftRevealBtn.addEventListener("click", () => {
   ftEn.classList.remove("hidden");
@@ -1795,11 +1911,20 @@ ftRevealBtn.addEventListener("click", () => {
   ftRevealBtn.classList.add("hidden");
 });
 
-document.getElementById("ft-play").addEventListener("click", () => playAllCards());
-document.getElementById("ft-slow").addEventListener("click", () => playAllCards(true));
+document.getElementById("ft-play").addEventListener("click", () => {
+  abortFtRecognition();
+  playAllCards();
+});
+document.getElementById("ft-slow").addEventListener("click", () => {
+  abortFtRecognition();
+  playAllCards(true);
+});
 document.getElementById("ft-stop").addEventListener("click", stopPlayAll);
 document.getElementById("fulltext-close").addEventListener("click", () => fulltextDialog.close());
-fulltextDialog.addEventListener("close", stopPlayAll);
+fulltextDialog.addEventListener("close", () => {
+  stopPlayAll();
+  abortFtRecognition();
+});
 
 // ---------------------------------------------------------------------------
 // スプレッドシート同期 (Google Apps Script 経由。設定手順は docs/sheets-sync-setup.md)
