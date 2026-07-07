@@ -580,10 +580,11 @@ function renderCard(card) {
       ${card.ja ? `<p class="eigo-card-ja">${chunkHtml(card.ja)}</p>` : ""}
       <p class="eigo-card-meta">
         <span class="level-badge">${levelLabel(card)}</span>
+        ${card.audio?.trackId ? '<span class="level-badge">🎧 音声つき</span>' : ""}
         ${nextInfo}
       </p>
       <div class="book-actions">
-        <button class="btn btn-small" data-action="speak" data-id="${card.id}">🔊 聞く</button>
+        <button class="btn btn-small" data-action="speak" data-id="${card.id}">${card.audio?.trackId ? "🎧" : "🔊"} 聞く</button>
         <button class="btn btn-small" data-action="edit" data-id="${card.id}">✏️ 編集</button>
         <button class="btn btn-small btn-danger" data-action="delete" data-id="${card.id}">🗑 削除</button>
       </div>
@@ -598,7 +599,7 @@ cardList.addEventListener("click", (e) => {
   if (!card) return;
   switch (action) {
     case "speak":
-      speak(speakableEnglish(card.en));
+      playCard(card);
       break;
     case "edit":
       openCardForm(card);
@@ -657,6 +658,336 @@ function speak(text, rate = 1.0, onEnd = null) {
   }
   speechSynthesis.speak(utter);
 }
+
+// ---------------------------------------------------------------------------
+// 音声ファイル (教材音声を IndexedDB に保存し、カードに区切りを割り当てて再生)
+// ---------------------------------------------------------------------------
+
+const AUDIO_DB = "english.audio.v1";
+
+let audioDbPromise = null;
+function openAudioDb() {
+  if (audioDbPromise) return audioDbPromise;
+  audioDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(AUDIO_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("tracks", { keyPath: "id" });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return audioDbPromise;
+}
+
+async function dbPutTrack(track) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("tracks", "readwrite");
+    tx.objectStore("tracks").put(track);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbGetTrack(id) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction("tracks").objectStore("tracks").get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbAllTracks() {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction("tracks").objectStore("tracks").getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbDeleteTrack(id) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("tracks", "readwrite");
+    tx.objectStore("tracks").delete(id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// --- クリップ再生 ---
+
+const clipAudio = new Audio();
+const trackUrlCache = new Map(); // trackId → objectURL
+let clipStopLoop = null;
+
+async function trackObjectUrl(trackId) {
+  if (trackUrlCache.has(trackId)) return trackUrlCache.get(trackId);
+  const track = await dbGetTrack(trackId);
+  if (!track) return null;
+  const url = URL.createObjectURL(track.blob);
+  trackUrlCache.set(trackId, url);
+  return url;
+}
+
+function stopClip() {
+  if (clipStopLoop) {
+    cancelAnimationFrame(clipStopLoop);
+    clipStopLoop = null;
+  }
+  if (!clipAudio.paused) clipAudio.pause();
+}
+
+/** トラックの start〜end 秒を再生する。トラックが無ければ false */
+async function playClip({ trackId, start = 0, end = 0 }, rate = 1) {
+  const url = await trackObjectUrl(trackId);
+  if (!url) return false;
+  stopClip();
+  window.speechSynthesis?.cancel();
+  if (clipAudio.src !== url) {
+    clipAudio.src = url;
+    await new Promise((resolve) => {
+      if (clipAudio.readyState > 0) return resolve();
+      clipAudio.addEventListener("loadedmetadata", resolve, { once: true });
+      clipAudio.addEventListener("error", resolve, { once: true });
+    });
+  }
+  clipAudio.playbackRate = rate;
+  clipAudio.currentTime = start;
+  try {
+    await clipAudio.play();
+  } catch {
+    return false;
+  }
+  if (end > start) {
+    const check = () => {
+      if (clipAudio.paused) {
+        clipStopLoop = null;
+        return;
+      }
+      if (clipAudio.currentTime >= end) {
+        clipAudio.pause();
+        clipStopLoop = null;
+        return;
+      }
+      clipStopLoop = requestAnimationFrame(check);
+    };
+    clipStopLoop = requestAnimationFrame(check);
+  }
+  return true;
+}
+
+/**
+ * カードのお手本を再生する。音声クリップが割り当てられていれば本物の音声、
+ * 無ければ読み上げ(TTS)にフォールバック
+ */
+async function playCard(card, slow = false) {
+  if (card.audio?.trackId) {
+    const ok = await playClip(card.audio, slow ? 0.7 : 1);
+    if (ok) return;
+  }
+  speak(speakableEnglish(card.en), slow ? 0.6 : 1);
+}
+
+// --- 音声ダイアログ(取り込み・一覧) ---
+
+const audioDialog = document.getElementById("audio-dialog");
+const trackListEl = document.getElementById("track-list");
+
+function formatBytes(n) {
+  return n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`;
+}
+
+async function renderTrackList() {
+  let tracks = [];
+  try {
+    tracks = await dbAllTracks();
+  } catch {
+    trackListEl.innerHTML = `<li class="hint">この端末では音声の保存を利用できません。</li>`;
+    return;
+  }
+  if (tracks.length === 0) {
+    trackListEl.innerHTML = `<li class="hint">音声はまだありません。「➕ 音声を取り込む」から追加してください。</li>`;
+    return;
+  }
+  tracks.sort((a, b) => (a.addedAt < b.addedAt ? -1 : 1));
+  trackListEl.innerHTML = tracks
+    .map((t) => {
+      const assigned = cards.filter((c) => c.audio?.trackId === t.id).length;
+      return `<li class="track-item">
+        <div class="track-info">
+          <span class="track-name">🎵 ${escapeHtml(t.name)}</span>
+          <span class="track-meta">${formatBytes(t.size)} ・ 割り当て済み ${assigned}枚</span>
+        </div>
+        <div class="track-actions">
+          <button class="btn btn-small" data-track-action="segment" data-id="${t.id}">✂️ 区切りを付ける</button>
+          <button class="btn btn-small btn-danger" data-track-action="delete" data-id="${t.id}">🗑</button>
+        </div>
+      </li>`;
+    })
+    .join("");
+}
+
+document.getElementById("audio-btn").addEventListener("click", () => {
+  renderTrackList();
+  audioDialog.showModal();
+});
+document.getElementById("audio-close").addEventListener("click", () => audioDialog.close());
+
+document.getElementById("audio-file-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const track = {
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    name: file.name,
+    size: file.size,
+    blob: file,
+    addedAt: new Date().toISOString(),
+  };
+  try {
+    await dbPutTrack(track);
+  } catch {
+    showToast("音声を保存できませんでした。空き容量やブラウザ設定を確認してください。", 7000);
+    return;
+  }
+  showToast(`🎵 「${file.name}」を取り込みました。次は「✂️ 区切りを付ける」でカードに割り当てましょう。`, 7000);
+  renderTrackList();
+});
+
+trackListEl.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-track-action]");
+  if (!btn) return;
+  const { trackAction, id } = btn.dataset;
+  if (trackAction === "segment") {
+    audioDialog.close();
+    openSegmentDialog(id);
+  } else if (trackAction === "delete") {
+    const track = await dbGetTrack(id);
+    if (!confirm(`「${track?.name || "この音声"}」を削除しますか?\nカードへの割り当ても解除されます。`)) return;
+    await dbDeleteTrack(id);
+    const url = trackUrlCache.get(id);
+    if (url) {
+      URL.revokeObjectURL(url);
+      trackUrlCache.delete(id);
+    }
+    let changed = false;
+    for (const c of cards) {
+      if (c.audio?.trackId === id) {
+        c.audio = null;
+        changed = true;
+      }
+    }
+    if (changed) saveCards();
+    render();
+    renderTrackList();
+  }
+});
+
+// --- 区切り付け(タップでカードに割り当て) ---
+
+const segmentDialog = document.getElementById("segment-dialog");
+const segAudio = document.getElementById("segment-audio");
+const segCardList = document.getElementById("segment-card-list");
+
+let seg = null; // { trackId, cards, index, start }
+
+async function openSegmentDialog(trackId) {
+  if (cards.length === 0) {
+    showToast("カードがまだありません。先に英文を登録してください。", 6000);
+    return;
+  }
+  const track = await dbGetTrack(trackId);
+  if (!track) return;
+  const url = await trackObjectUrl(trackId);
+  stopClip();
+  segAudio.src = url;
+  document.getElementById("segment-track-name").textContent = `🎵 ${track.name}`;
+  seg = {
+    trackId,
+    cards: cards.slice(), // トレーニングと同じ並び(会話の順)
+    index: 0,
+    start: 0,
+  };
+  renderSegmentList();
+  segmentDialog.showModal();
+}
+
+function segTimeLabel(sec) {
+  const m = Math.floor(sec / 60);
+  const s = (sec % 60).toFixed(1).padStart(4, "0");
+  return `${m}:${s}`;
+}
+
+function renderSegmentList() {
+  if (!seg) return;
+  segCardList.innerHTML = seg.cards
+    .map((c, i) => {
+      const a = c.audio?.trackId === seg.trackId ? c.audio : null;
+      const range = a ? `${segTimeLabel(a.start)} 〜 ${segTimeLabel(a.end)}` : "―";
+      return `<li class="segment-row${i === seg.index ? " current" : ""}" data-index="${i}">
+        <span class="segment-row-no">${i + 1}</span>
+        <span class="segment-row-en">${escapeHtml(c.en)}</span>
+        <span class="segment-row-time">${range}</span>
+      </li>`;
+    })
+    .join("");
+  const current = segCardList.querySelector(".segment-row.current");
+  if (current) current.scrollIntoView({ block: "nearest" });
+}
+
+document.getElementById("seg-mark").addEventListener("click", () => {
+  if (!seg) return;
+  if (seg.index >= seg.cards.length) {
+    showToast("すべてのカードに割り当て済みです。", 5000);
+    return;
+  }
+  const t = segAudio.currentTime;
+  if (t <= seg.start + 0.2) return; // 同じ場所での連打は無視
+  const card = seg.cards[seg.index];
+  updateCard(card.id, { audio: { trackId: seg.trackId, start: seg.start, end: t } });
+  seg.start = t;
+  seg.index++;
+  renderSegmentList();
+  if (seg.index >= seg.cards.length) {
+    segAudio.pause();
+    showToast("🎉 すべてのカードに音声を割り当てました!");
+  }
+});
+
+document.getElementById("seg-back").addEventListener("click", () => {
+  segAudio.currentTime = Math.max(0, segAudio.currentTime - 3);
+});
+
+document.getElementById("seg-undo").addEventListener("click", () => {
+  if (!seg || seg.index === 0) return;
+  seg.index--;
+  const card = seg.cards[seg.index];
+  const prevStart = card.audio?.start ?? 0;
+  updateCard(card.id, { audio: null });
+  seg.start = prevStart;
+  segAudio.currentTime = prevStart;
+  renderSegmentList();
+});
+
+segCardList.addEventListener("click", (e) => {
+  const row = e.target.closest(".segment-row");
+  if (!row || !seg) return;
+  const i = Number(row.dataset.index);
+  seg.index = i;
+  // そのカードの割り当て済み開始位置、無ければ現在の再生位置から区切り直す
+  const existing = seg.cards[i].audio;
+  seg.start = existing?.trackId === seg.trackId ? existing.start : segAudio.currentTime;
+  segAudio.currentTime = seg.start;
+  renderSegmentList();
+});
+
+document.getElementById("segment-close").addEventListener("click", () => segmentDialog.close());
+segmentDialog.addEventListener("close", () => {
+  segAudio.pause();
+  seg = null;
+  render();
+});
 
 // ---------------------------------------------------------------------------
 // 発音チェック (Web Speech API: SpeechRecognition)
@@ -852,6 +1183,7 @@ function startPractice() {
 function showNextCard() {
   stopRecognition();
   window.speechSynthesis?.cancel();
+  stopClip();
   if (queue.length === 0) {
     practiceDialog.close();
     showToast(`🎉 復習おわり!${sessionTotal}枚がんばりました。`);
@@ -933,10 +1265,10 @@ document.getElementById("mode-toggle").addEventListener("click", (e) => {
 });
 
 document.getElementById("speak-btn").addEventListener("click", () => {
-  if (currentCard) speak(speakableEnglish(currentCard.en));
+  if (currentCard) playCard(currentCard);
 });
 document.getElementById("speak-slow-btn").addEventListener("click", () => {
-  if (currentCard) speak(speakableEnglish(currentCard.en), 0.6);
+  if (currentCard) playCard(currentCard, true);
 });
 recordBtn.addEventListener("click", () => {
   if (currentCard) startPronunciationCheck(speakableEnglish(currentCard.en));
@@ -948,6 +1280,7 @@ document.getElementById("practice-close").addEventListener("click", () => {
 practiceDialog.addEventListener("close", () => {
   stopRecognition();
   window.speechSynthesis?.cancel();
+  stopClip();
   currentCard = null;
   render();
 });
@@ -1122,6 +1455,7 @@ function stopTrainingTimer() {
 function renderTrainingStep() {
   stopRecognition();
   window.speechSynthesis?.cancel();
+  stopClip();
   stopTrainingTimer();
   if (!training) return;
 
@@ -1155,9 +1489,9 @@ function renderTrainingStep() {
 
   setupTrainingTools(method);
 
-  // シャドーイング等は自動で1回読み上げる
+  // シャドーイング等は自動で1回お手本を再生する
   if (method.autoplay) {
-    speak(speakableEnglish(card.en));
+    playCard(card);
   }
 }
 
@@ -1288,11 +1622,11 @@ document.getElementById("training-menu").addEventListener("click", (e) => {
 
 document.getElementById("tr-play").addEventListener("click", () => {
   const card = training?.cards[training.index];
-  if (card) speak(speakableEnglish(card.en));
+  if (card) playCard(card);
 });
 document.getElementById("tr-slow").addEventListener("click", () => {
   const card = training?.cards[training.index];
-  if (card) speak(speakableEnglish(card.en), 0.6);
+  if (card) playCard(card, true);
 });
 trRecordBtn.addEventListener("click", () => {
   const card = training?.cards[training.index];
@@ -1312,6 +1646,7 @@ document.getElementById("training-close").addEventListener("click", () => traini
 trainingDialog.addEventListener("close", () => {
   stopRecognition();
   window.speechSynthesis?.cancel();
+  stopClip();
   stopTrainingTimer();
   training = null;
 });

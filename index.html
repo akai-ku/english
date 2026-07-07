@@ -14,6 +14,7 @@
       <button id="training-menu-btn" class="btn btn-primary">🎯 トレーニング</button>
       <button id="photo-add-btn" class="btn">📷 写真から追加</button>
       <button id="manual-add-btn" class="btn">✏️ 手動で追加</button>
+      <button id="audio-btn" class="btn">🎧 音声</button>
     </div>
   </header>
 
@@ -163,6 +164,42 @@
 
     <div class="dialog-actions">
       <button type="button" id="training-close" class="btn">終了する</button>
+    </div>
+  </dialog>
+
+  <!-- 音声ファイルの管理 -->
+  <dialog id="audio-dialog" class="dialog">
+    <h2>🎧 音声ファイル</h2>
+    <p class="hint">
+      教材の音声(mp3 / m4a など)を取り込むと、お手本の再生が機械音声のかわりに本物の音声になります。
+      音声は<strong>この端末のブラウザ内にだけ</strong>保存され、どこにも送信されません。
+    </p>
+    <label class="btn btn-primary audio-add-label">➕ 音声を取り込む
+      <input id="audio-file-input" type="file" accept="audio/*" hidden>
+    </label>
+    <ul id="track-list" class="track-list"></ul>
+    <div class="dialog-actions">
+      <button type="button" id="audio-close" class="btn">閉じる</button>
+    </div>
+  </dialog>
+
+  <!-- 音声の区切り付け(カードへの割り当て) -->
+  <dialog id="segment-dialog" class="dialog practice-dialog">
+    <h2>✂️ 音声をカードに割り当て</h2>
+    <p class="hint">
+      再生しながら、各英文を<strong>言い終わった瞬間</strong>に「✂️ ここで区切る」を押してください。
+      上から順にカードへ割り当てられます。行をタップすると、そのカードから割り当て直せます。
+    </p>
+    <p id="segment-track-name" class="segment-track-name"></p>
+    <audio id="segment-audio" controls class="segment-audio"></audio>
+    <div class="segment-controls">
+      <button type="button" id="seg-back" class="btn">⏪ 3秒戻る</button>
+      <button type="button" id="seg-mark" class="btn btn-primary">✂️ ここで区切る</button>
+      <button type="button" id="seg-undo" class="btn">↩️ ひとつ戻す</button>
+    </div>
+    <ul id="segment-card-list" class="segment-card-list"></ul>
+    <div class="dialog-actions">
+      <button type="button" id="segment-close" class="btn">閉じる</button>
     </div>
   </dialog>
 
