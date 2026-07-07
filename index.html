@@ -15,6 +15,8 @@
       <button id="photo-add-btn" class="btn">📷 写真から追加</button>
       <button id="manual-add-btn" class="btn">✏️ 手動で追加</button>
       <button id="audio-btn" class="btn">🎧 音声</button>
+      <button id="save-btn" class="btn">💾 保存</button>
+      <button id="sync-settings-btn" class="btn" aria-label="スプレッドシート連携の設定">⚙️</button>
     </div>
   </header>
 
@@ -123,6 +125,11 @@
       Input → Output を繰り返して、英文を「わかる」から「使える」へ。
       上の段階から順に進めるのがおすすめです。カードは登録順に出題されます。
     </p>
+    <div class="mode-toggle scope-toggle" id="scope-toggle" role="group" aria-label="練習の範囲">
+      <button type="button" class="mode-btn active" data-scope="card">🃏 カード練習</button>
+      <button type="button" class="mode-btn" data-scope="full">📖 全文練習</button>
+    </div>
+    <p id="scope-hint" class="hint">1枚ずつじっくり。ページ送りしながら練習します。</p>
     <div id="training-menu" class="training-menu"></div>
     <div class="dialog-actions">
       <button type="button" id="training-menu-close" class="btn">閉じる</button>
@@ -164,6 +171,65 @@
 
     <div class="dialog-actions">
       <button type="button" id="training-close" class="btn">終了する</button>
+    </div>
+  </dialog>
+
+  <!-- 全文練習 -->
+  <dialog id="fulltext-dialog" class="dialog practice-dialog">
+    <div class="practice-top">
+      <div>
+        <span id="ft-stage" class="stage-label"></span>
+        <span id="ft-name" class="method-title"></span>
+      </div>
+      <span class="practice-count">📖 全文</span>
+    </div>
+    <p id="ft-hint" class="practice-hint"></p>
+    <div class="practice-card fulltext-scroll">
+      <div id="ft-ja" class="fulltext-panel hidden"></div>
+      <div id="ft-en" class="fulltext-panel hidden"></div>
+    </div>
+    <div class="practice-tools">
+      <button type="button" id="ft-play" class="btn btn-small">▶️ 全文再生</button>
+      <button type="button" id="ft-slow" class="btn btn-small">🐢 ゆっくり</button>
+      <button type="button" id="ft-stop" class="btn btn-small">⏹ 停止</button>
+      <button type="button" id="ft-reveal" class="btn btn-small hidden">👁 全文を見る</button>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="fulltext-close" class="btn">終了する</button>
+    </div>
+  </dialog>
+
+  <!-- スプレッドシート連携 -->
+  <dialog id="sync-dialog" class="dialog">
+    <h2>☁️ スプレッドシート連携</h2>
+    <p class="hint">
+      ページを開くと自動で最新データを読み込みます。
+      カードを変更したら「💾 保存」を押してください。
+      (音声ファイル自体は同期されません。カードと割り当て位置のみ同期されます)
+    </p>
+    <div class="sync-actions">
+      <button id="sync-pull" class="btn">📥 いますぐ読み込み直す</button>
+      <p id="sync-status" class="sync-status"></p>
+    </div>
+    <details id="sync-config">
+      <summary>接続設定</summary>
+      <form id="sync-config-form">
+        <label>Apps ScriptのURL
+          <input type="url" id="sync-url" placeholder="https://script.google.com/macros/s/…/exec">
+        </label>
+        <label>合言葉
+          <input type="text" id="sync-key" placeholder="Apps Scriptに設定したものと同じ">
+        </label>
+        <button type="submit" class="btn">設定を保存</button>
+      </form>
+      <p class="hint">
+        初回のセットアップ手順は
+        <a href="https://github.com/akai-ku/english/blob/main/docs/sheets-sync-setup.md" target="_blank" rel="noopener">こちらの手順書</a>
+        を見てください(10分ほどで終わります)。
+      </p>
+    </details>
+    <div class="dialog-actions">
+      <button id="sync-close" class="btn">閉じる</button>
     </div>
   </dialog>
 

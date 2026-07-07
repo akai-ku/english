@@ -19,8 +19,20 @@ function loadCards() {
   }
 }
 
+const DIRTY_KEY = "english.dirty.v1";
+
 function saveCards() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+  // スプレッドシートにまだ保存していない変更がある印
+  localStorage.setItem(DIRTY_KEY, "1");
+}
+
+function isDirty() {
+  return localStorage.getItem(DIRTY_KEY) === "1";
+}
+
+function clearDirty() {
+  localStorage.removeItem(DIRTY_KEY);
 }
 
 /** ローカル時刻での YYYY-MM-DD 文字列 */
@@ -1615,9 +1627,31 @@ function trainingNext(step = 1) {
 document.getElementById("training-menu-btn").addEventListener("click", openTrainingMenu);
 document.getElementById("training-menu-close").addEventListener("click", () => trainingMenuDialog.close());
 
+let trainingScope = "card"; // "card" = 1枚ずつ / "full" = 全文とおし
+
+const SCOPE_HINTS = {
+  card: "1枚ずつじっくり。ページ送りしながら練習します。",
+  full: "会話全体をとおしで練習します。音声も全文を連続再生します。",
+};
+
+document.getElementById("scope-toggle").addEventListener("click", (e) => {
+  const btn = e.target.closest(".mode-btn");
+  if (!btn) return;
+  trainingScope = btn.dataset.scope;
+  document
+    .querySelectorAll("#scope-toggle .mode-btn")
+    .forEach((b) => b.classList.toggle("active", b === btn));
+  document.getElementById("scope-hint").textContent = SCOPE_HINTS[trainingScope];
+});
+
 document.getElementById("training-menu").addEventListener("click", (e) => {
   const btn = e.target.closest(".method-btn");
-  if (btn) startTraining(btn.dataset.method);
+  if (!btn) return;
+  if (trainingScope === "full") {
+    startFulltext(btn.dataset.method);
+  } else {
+    startTraining(btn.dataset.method);
+  }
 });
 
 document.getElementById("tr-play").addEventListener("click", () => {
@@ -1652,7 +1686,329 @@ trainingDialog.addEventListener("close", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 全文練習 (会話全体をとおしで練習する)
+// ---------------------------------------------------------------------------
+
+const fulltextDialog = document.getElementById("fulltext-dialog");
+const ftEn = document.getElementById("ft-en");
+const ftJa = document.getElementById("ft-ja");
+const ftRevealBtn = document.getElementById("ft-reveal");
+
+// 手法ごとの全文表示: hide-en = 英文を隠す / hide-ja = 日本語を隠す / show-all
+const FULLTEXT_MODES = {
+  shadowing: "hide-en",
+  overlapping: "show-all",
+  reading: "show-all",
+  intensive: "show-all",
+  retention: "hide-en",
+  repeating: "hide-en",
+  sightEJ: "hide-ja",
+  qtrans: "hide-en",
+  sightJE: "hide-en",
+};
+
+let fulltextCards = [];
+let playAllToken = 0;
+
+function stopPlayAll() {
+  playAllToken++;
+  stopClip();
+  window.speechSynthesis?.cancel();
+}
+
+function speakAndWait(text, rate = 1) {
+  return new Promise((resolve) => {
+    if (!("speechSynthesis" in window)) return resolve();
+    speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "en-US";
+    const voice = pickEnglishVoice();
+    if (voice) utter.voice = voice;
+    utter.rate = rate;
+    utter.onend = resolve;
+    utter.onerror = resolve;
+    speechSynthesis.speak(utter);
+  });
+}
+
+async function playCardAndWait(card, slow, token) {
+  if (card.audio?.trackId) {
+    const ok = await playClip(card.audio, slow ? 0.7 : 1);
+    if (ok) {
+      // クリップは区切り位置で自動停止するので、止まるまで待つ
+      while (!clipAudio.paused && token === playAllToken) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return;
+    }
+  }
+  await speakAndWait(speakableEnglish(card.en), slow ? 0.6 : 1);
+}
+
+/** 全カードを会話の順に連続再生する(教材音声があればそれを使用) */
+async function playAllCards(slow = false) {
+  stopPlayAll();
+  const token = playAllToken;
+  for (const card of fulltextCards) {
+    if (token !== playAllToken) return;
+    await playCardAndWait(card, slow, token);
+    if (token !== playAllToken) return;
+    await new Promise((r) => setTimeout(r, 300)); // 発話間の小休止
+  }
+}
+
+function startFulltext(methodId) {
+  if (cards.length === 0) {
+    showToast("カードがまだありません。まず英文を登録しましょう。", 6000);
+    return;
+  }
+  const m = TRAINING_METHODS[methodId];
+  trainingMenuDialog.close();
+  fulltextCards = cards.slice(); // 会話の流れを保つため登録順のまま
+
+  document.getElementById("ft-stage").textContent = m.stageLabel;
+  document.getElementById("ft-name").textContent = `${m.icon} ${m.name}(全文)`;
+  document.getElementById("ft-hint").textContent = m.hint;
+
+  ftEn.innerHTML = fulltextCards
+    .map((c) => `<p class="ft-line">${chunkHtml(c.en)}</p>`)
+    .join("");
+  const jaLines = fulltextCards.filter((c) => c.ja);
+  ftJa.innerHTML = jaLines.length
+    ? fulltextCards
+        .map((c) => `<p class="ft-line ft-line-ja">${c.ja ? chunkHtml(c.ja) : "―"}</p>`)
+        .join("")
+    : `<p class="hint">(日本語訳が未登録です)</p>`;
+
+  const mode = FULLTEXT_MODES[methodId] || "show-all";
+  ftEn.classList.toggle("hidden", mode === "hide-en");
+  ftJa.classList.toggle("hidden", mode === "hide-ja");
+  ftRevealBtn.classList.toggle("hidden", mode === "show-all");
+
+  fulltextDialog.showModal();
+  if (m.autoplay) playAllCards();
+}
+
+ftRevealBtn.addEventListener("click", () => {
+  ftEn.classList.remove("hidden");
+  ftJa.classList.remove("hidden");
+  ftRevealBtn.classList.add("hidden");
+});
+
+document.getElementById("ft-play").addEventListener("click", () => playAllCards());
+document.getElementById("ft-slow").addEventListener("click", () => playAllCards(true));
+document.getElementById("ft-stop").addEventListener("click", stopPlayAll);
+document.getElementById("fulltext-close").addEventListener("click", () => fulltextDialog.close());
+fulltextDialog.addEventListener("close", stopPlayAll);
+
+// ---------------------------------------------------------------------------
+// スプレッドシート同期 (Google Apps Script 経由。設定手順は docs/sheets-sync-setup.md)
+// ---------------------------------------------------------------------------
+
+const SYNC_STORAGE_KEY = "english.sync.v1";
+
+const syncDialog = document.getElementById("sync-dialog");
+const syncStatus = document.getElementById("sync-status");
+const syncConfigDetails = document.getElementById("sync-config");
+const saveBtn = document.getElementById("save-btn");
+const syncPullBtn = document.getElementById("sync-pull");
+
+function loadSyncConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(SYNC_STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSyncConfig(config) {
+  localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(config));
+}
+
+function isSyncConfigured() {
+  const config = loadSyncConfig();
+  return Boolean(config.url && config.key);
+}
+
+function openSyncDialog() {
+  const config = loadSyncConfig();
+  document.getElementById("sync-url").value = config.url || "";
+  document.getElementById("sync-key").value = config.key || "";
+  updateSyncUi();
+  syncDialog.showModal();
+}
+
+function updateSyncUi() {
+  const configured = isSyncConfigured();
+  syncPullBtn.disabled = !configured;
+  syncConfigDetails.open = !configured;
+  if (!configured) {
+    setSyncStatus("最初に下の「接続設定」からURLと合言葉を設定してください。");
+  } else {
+    const { lastSyncAt } = loadSyncConfig();
+    setSyncStatus(
+      lastSyncAt
+        ? `前回の保存・読み込み: ${new Date(lastSyncAt).toLocaleString("ja-JP")}`
+        : "設定済みです。「💾 保存」を押すとスプレッドシートに保存されます。"
+    );
+  }
+}
+
+function setSyncStatus(text) {
+  syncStatus.textContent = text;
+}
+
+async function callSheetApi(payload) {
+  const { url, key } = loadSyncConfig();
+  // Content-Type を text/plain にすると CORS のプリフライトが発生せず、
+  // Apps Script のウェブアプリにそのまま届く
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ key, ...payload }),
+  });
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(
+      "スプレッドシートからの応答を読み取れませんでした。URLとデプロイ設定(アクセス: 全員)を確認してください。"
+    );
+  }
+  if (!data.ok) throw new Error(data.error || "不明なエラー");
+  return data;
+}
+
+function markSynced() {
+  const config = loadSyncConfig();
+  config.lastSyncAt = new Date().toISOString();
+  saveSyncConfig(config);
+}
+
+/** シートへ送る形式に変換(音声クリップの割り当てはJSON文字列で1列に収める) */
+function cardsForSheet() {
+  return cards.map((c) => ({
+    ...c,
+    audio: c.audio ? JSON.stringify(c.audio) : "",
+  }));
+}
+
+/** シートから受け取ったカードをアプリの形式に戻す */
+function migrateIncomingCard(c) {
+  let audio = null;
+  if (c.audio) {
+    try {
+      audio = typeof c.audio === "string" ? JSON.parse(c.audio) : c.audio;
+    } catch {
+      audio = null;
+    }
+  }
+  return {
+    id: String(c.id),
+    en: String(c.en || ""),
+    ja: String(c.ja || ""),
+    level: Math.min(MAX_LEVEL, Number(c.level) || 0),
+    dueAt: String(c.dueAt || toLocalDateStr()).slice(0, 10),
+    reviews: Number(c.reviews) || 0,
+    lapses: Number(c.lapses) || 0,
+    addedAt: String(c.addedAt || new Date().toISOString()),
+    lastReviewedAt: String(c.lastReviewedAt || ""),
+    audio: audio && audio.trackId ? audio : null,
+  };
+}
+
+async function pushToSheet() {
+  if (!isSyncConfigured()) {
+    openSyncDialog();
+    return;
+  }
+  saveBtn.disabled = true;
+  showToast("💾 スプレッドシートに保存しています…");
+  try {
+    const data = await callSheetApi({ action: "save", cards: cardsForSheet() });
+    markSynced();
+    clearDirty();
+    showToast(`✅ ${data.count}枚をスプレッドシートに保存しました。`);
+  } catch (err) {
+    showToast(`保存に失敗しました: ${err.message}`, 8000);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+/** ページを開いたときにスプレッドシートの最新データを取り込む */
+async function autoLoadFromSheet() {
+  if (!isSyncConfigured()) return;
+  if (isDirty()) {
+    showToast(
+      "⚠️ この端末に未保存の変更があるため、自動読み込みをスキップしました。「💾 保存」を押してください。",
+      8000
+    );
+    return;
+  }
+  try {
+    const data = await callSheetApi({ action: "load" });
+    const incoming = (Array.isArray(data.cards) ? data.cards : []).map(migrateIncomingCard);
+    cards = incoming;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+    clearDirty();
+    render();
+    markSynced();
+    showToast(`☁️ 最新データを読み込みました(${incoming.length}枚)`);
+  } catch (err) {
+    showToast(`自動読み込みに失敗しました: ${err.message}`, 8000);
+  }
+}
+
+async function pullFromSheet() {
+  syncPullBtn.disabled = true;
+  setSyncStatus("スプレッドシートから読み込んでいます…");
+  try {
+    const data = await callSheetApi({ action: "load" });
+    const incoming = (Array.isArray(data.cards) ? data.cards : []).map(migrateIncomingCard);
+    const message =
+      `スプレッドシートの${incoming.length}枚で、` +
+      `この端末の${cards.length}枚を置き換えます。よろしいですか?`;
+    if (!confirm(message)) {
+      setSyncStatus("読み込みをキャンセルしました。");
+      return;
+    }
+    cards = incoming;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+    clearDirty();
+    render();
+    markSynced();
+    setSyncStatus(`✅ ${incoming.length}枚を読み込みました。`);
+  } catch (err) {
+    setSyncStatus(`読み込みに失敗しました: ${err.message}`);
+  } finally {
+    syncPullBtn.disabled = false;
+  }
+}
+
+saveBtn.addEventListener("click", pushToSheet);
+document.getElementById("sync-settings-btn").addEventListener("click", openSyncDialog);
+document.getElementById("sync-close").addEventListener("click", () => syncDialog.close());
+syncPullBtn.addEventListener("click", pullFromSheet);
+
+document.getElementById("sync-config-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const url = document.getElementById("sync-url").value.trim();
+  const key = document.getElementById("sync-key").value.trim();
+  if (!url || !key) {
+    setSyncStatus("URLと合言葉の両方を入力してください。");
+    return;
+  }
+  const config = loadSyncConfig();
+  saveSyncConfig({ ...config, url, key });
+  syncConfigDetails.open = false;
+  updateSyncUi();
+  setSyncStatus("設定を保存しました。まず「💾 保存」を押してスプレッドシートに書き込んでみてください。");
+});
+
+// ---------------------------------------------------------------------------
 // 起動
 // ---------------------------------------------------------------------------
 
 render();
+autoLoadFromSheet();
