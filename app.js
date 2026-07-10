@@ -1732,29 +1732,64 @@ function speakAndWait(text, rate = 1) {
   });
 }
 
-async function playCardAndWait(card, slow, token) {
-  if (card.audio?.trackId) {
-    const ok = await playClip(card.audio, slow ? 0.7 : 1);
-    if (ok) {
-      // クリップは区切り位置で自動停止するので、止まるまで待つ
-      while (!clipAudio.paused && token === playAllToken) {
-        await new Promise((r) => setTimeout(r, 100));
+// 隣り合うカードのクリップがこの秒数以内でつながっていれば、
+// 切り貼りせず元の音声をその区間ごと通しで再生する
+const CLIP_MERGE_GAP = 3;
+
+/**
+ * 全文再生の計画を立てる。同じトラックで時間が連続しているクリップは
+ * 1つの区間にまとめ、元の音声をそのまま通しで再生する(会話の間合いも残る)。
+ * 音声が無いカードや、取り込まれていないトラックのカードはTTSで読む
+ */
+async function buildPlayPlan(list) {
+  const available = new Map();
+  for (const id of new Set(list.map((c) => c.audio?.trackId).filter(Boolean))) {
+    available.set(id, Boolean(await dbGetTrack(id).catch(() => null)));
+  }
+  const plan = [];
+  for (const card of list) {
+    const a = card.audio;
+    if (a?.trackId && available.get(a.trackId)) {
+      const last = plan[plan.length - 1];
+      if (
+        last &&
+        last.type === "clip" &&
+        last.trackId === a.trackId &&
+        a.start >= last.end - 0.5 &&
+        a.start - last.end <= CLIP_MERGE_GAP
+      ) {
+        last.end = Math.max(last.end, a.end); // 連続 → 区間を伸ばすだけ
+      } else {
+        plan.push({ type: "clip", trackId: a.trackId, start: a.start, end: a.end });
       }
-      return;
+    } else {
+      plan.push({ type: "tts", text: speakableEnglish(card.en) });
     }
   }
-  await speakAndWait(speakableEnglish(card.en), slow ? 0.6 : 1);
+  return plan;
 }
 
 /** 全カードを会話の順に連続再生する(教材音声があればそれを使用) */
 async function playAllCards(slow = false) {
   stopPlayAll();
   const token = playAllToken;
-  for (const card of fulltextCards) {
+  const plan = await buildPlayPlan(fulltextCards);
+  if (token !== playAllToken) return;
+  for (const step of plan) {
     if (token !== playAllToken) return;
-    await playCardAndWait(card, slow, token);
+    if (step.type === "clip") {
+      const ok = await playClip(step, slow ? 0.7 : 1);
+      if (ok) {
+        // 区間の終わりで自動停止するので、止まるまで待つ
+        while (!clipAudio.paused && token === playAllToken) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+    } else {
+      await speakAndWait(step.text, slow ? 0.6 : 1);
+    }
     if (token !== playAllToken) return;
-    await new Promise((r) => setTimeout(r, 300)); // 発話間の小休止
+    await new Promise((r) => setTimeout(r, 300)); // 区間の切り替わりの小休止
   }
 }
 
